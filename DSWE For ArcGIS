@@ -1,0 +1,94 @@
+
+"""
+Created on Wed Nov 20 12:07:33 2019
+
+@author: cbwong
+"""
+#import modules
+import arcpy as ap
+import os
+from arcpy.sa import *
+import shutil
+ap.env.overwriteOutput = 'true'
+
+#set path to the location of Sentinel 2 bands
+path = '''D:\Projects\DepressionStorageRemoteSensing\Level2ASentinel\S2A_MSIL2A_20190629T170901_N0212_R112_T15TVH_20190629T213103.SAFE\GRANULE\L2A_T15TVH_A020987_20190629T171920\IMG_DATA\R20m'''
+cloudmask = '''D:\Projects\DepressionStorageRemoteSensing\Level2ASentinel\S2A_MSIL2A_20190629T170901_N0212_R112_T15TVH_20190629T213103.SAFE\GRANULE\L2A_T15TVH_A020987_20190629T171920\QI_DATA\MSK_CLDPRB_20m.jp2'''
+folderpath = '''D:\Projects\DepressionStorageRemoteSensing\DSWE'''
+
+def bandsearch(ending):
+    """search for files that end with a certain Sentinel-2 band naming
+    convention"""
+    for file in os.listdir(path):
+        if file.endswith(ending):
+            return file
+
+#create raster objects from the necessary bands, assuming the naming convention  
+blue = Raster(os.path.join(path, bandsearch("B02_20m.jp2")))
+green = Raster(os.path.join(path, bandsearch("B03_20m.jp2")))
+red = Raster(os.path.join(path, bandsearch("B04_20m.jp2")))
+NIR = Raster(os.path.join(path, bandsearch("B8A_20m.jp2")))
+SWIR1 = Raster(os.path.join(path, bandsearch("B11_20m.jp2")))
+SWIR2 = Raster(os.path.join(path, bandsearch("B12_20m.jp2")))
+
+#set extent
+ap.env.extent = blue
+
+#perform raster algebra to make indexes
+mndwi = (green - SWIR1) / (green + SWIR1) #modified normalized differed wetness index
+mbsrv = green + red #multi-band spectral relationship visible
+mbsrn = NIR + SWIR1 #multi-band spectral relationship near-infrared
+ndvi = (NIR - red) / (NIR + red) #normalized difference vegetation index
+awesh = blue + (green * 2.5) + (mbsrn * -1.5) + (SWIR2 * -0.25) #automated water extent shadow
+
+mndwiThresh1 = .124
+aweshThresh = 0
+mndwiThresh2 = -.44
+swir1Thresh1 = 900
+nirThresh1 = 1500
+ndviThresh = .7
+mndwiThresh3 = -.5
+blueThresh = 1000
+swir1Thresh2 = 3000
+swir2Thresh = 1000
+nirThresh2 = 2500
+#set the digits based on conditional statements. A total of 5 tests are performed,
+#   with each digit representing a pass or fail of a test
+ones = Con(mndwi > mndwiThresh1, 1, 0)
+tens = Con(mbsrv > mbsrn, 10, 0)
+hundreds = Con(awesh > aweshThresh, 100, 0)
+thousands = Con((mndwi > mndwiThresh2) & (SWIR1 < swir1Thresh1) & 
+                (NIR < nirThresh1) & (ndvi < ndviThresh), 1000, 0)
+tenthousands = Con((mndwi > mndwiThresh3) & (blue < blueThresh) & 
+                   (SWIR1 < swir1Thresh2) & (SWIR2 < swir2Thresh) & 
+                   (NIR < nirThresh2), 10000, 0)
+                   
+#save each layer for troubleshooting
+#ones.save('D:\Projects\DepressionStorageRemoteSensing\ones.tif')
+#tens.save('D:\Projects\DepressionStorageRemoteSensing\\tens.tif')
+#hundreds.save('D:\Projects\DepressionStorageRemoteSensing\hundreds.tif')
+#thousands.save('D:\Projects\DepressionStorageRemoteSensing\\thousands.tif')
+#tenthousands.save('D:\Projects\DepressionStorageRemoteSensing\\tenthousands.tif')
+
+#add the digits together to get a final pass-fail total
+DSWE = ones + tens + hundreds + thousands + tenthousands
+DSWE.save('D:\Projects\DepressionStorageRemoteSensing\DSWE\DSWE.tif') #rasters comtaining 5 digit test results
+
+#reclass the values to descriptive categories
+newvalues = RemapValue([[1,0],[10,0],[100,0],[1000,0],[1111,1],[10111,1],[11011,1],
+             [11101,1],[11110,1],[11111,1],[111,2],[1011,2],[1101,2],[1110,2],
+             [10011,2],[10101,2],[10110,2],[11001,2],[11010,2],[11100,2],
+             [11000,3],[11,4],[101,4],[110,4],[1001,4],[1010,4],
+             [1100,4],[10000,4],[10001,4],[10010,4],[10100,4]])
+
+outReclass = Reclassify(DSWE, "VALUE", newvalues, "")
+outReclass.save('D:\Projects\DepressionStorageRemoteSensing\DSWE\DSWEReclassBase.tif') #results reclassed into interpretable values
+
+#apply a cloud mask
+newclouds = RemapRange([[0, 99, 0], [100, 200, 9]])
+cloudReclass = Reclassify(cloudmask, "VALUE", newclouds, "")
+cloudReclass.save('D:\Projects\DepressionStorageRemoteSensing\DSWE\mask.tif') #cloud mask itself
+maskedRaster = Con(cloudReclass == 9, cloudReclass, outReclass)
+maskedRaster.save('D:\Projects\DepressionStorageRemoteSensing\DSWE\DSWEmask.tif')#merged reclass and mask to get a water raster with clouds masked out
+
+print("Done")
